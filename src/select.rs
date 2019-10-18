@@ -6,23 +6,43 @@ use theme::{get_default_theme, SelectionStyle, TermThemeRenderer, Theme};
 
 use console::{Key, Term};
 
+use regex::Regex;
+
 /// Renders a selection menu.
 pub struct Select<'a> {
     default: usize,
     items: Vec<String>,
     prompt: Option<String>,
     clear: bool,
-    theme: &'a Theme,
+    theme: &'a dyn Theme,
     paged: bool,
+    offset: usize,
+    lines_per_item: usize,
 }
 
 /// Renders a multi select checkbox menu.
 pub struct Checkboxes<'a> {
+    defaults: Vec<bool>,
     items: Vec<String>,
     prompt: Option<String>,
     clear: bool,
-    theme: &'a Theme,
+    theme: &'a dyn Theme,
     paged: bool,
+    offset: usize,
+    lines_per_item: usize,
+}
+
+/// Renders a selection menu that user can fuzzy match to reduce set.
+pub struct FuzzySelect<'a> {
+    default: usize,
+    items: Vec<String>,
+    prompt: Option<String>,
+    clear: bool,
+    theme: &'a dyn Theme,
+    paged: bool,
+    offset: usize,
+    lines_per_item: usize,
+    ignore_casing: bool,
 }
 
 impl<'a> Select<'a> {
@@ -32,7 +52,7 @@ impl<'a> Select<'a> {
     }
 
     /// Same as `new` but with a specific theme.
-    pub fn with_theme(theme: &'a Theme) -> Select<'a> {
+    pub fn with_theme(theme: &'a dyn Theme) -> Select<'a> {
         Select {
             default: !0,
             items: vec![],
@@ -40,6 +60,8 @@ impl<'a> Select<'a> {
             clear: true,
             theme: theme,
             paged: false,
+            offset: 1,
+            lines_per_item: 1,
         }
     }
     /// Enables or disables paging
@@ -61,8 +83,20 @@ impl<'a> Select<'a> {
         self
     }
 
+    /// Sets number of lines paged offset includes
+    pub fn offset(&mut self, val: usize) -> &mut Select<'a> {
+        self.offset = val;
+        self
+    }
+
+    /// Enables or disables paging
+    pub fn lines_per_item(&mut self, val: usize) -> &mut Select<'a> {
+        self.lines_per_item = val;
+        self
+    }
+
     /// Add a single item to the selector.
-    pub fn item(&mut self, item: &str) -> &mut Select<'a> {
+    pub fn item<T: ToString>(&mut self, item: &T) -> &mut Select<'a> {
         self.items.push(item.to_string());
         self
     }
@@ -70,7 +104,7 @@ impl<'a> Select<'a> {
     /// Adds multiple items to the selector.
     pub fn items<T: ToString>(&mut self, items: &[T]) -> &mut Select<'a> {
         for item in items {
-            self.items.push(item.to_string());
+            self.item(item);
         }
         self
     }
@@ -119,7 +153,7 @@ impl<'a> Select<'a> {
         let mut page = 0;
         let mut capacity = self.items.len();
         if self.paged {
-            capacity = term.size().0 as usize - 1;
+            capacity = (term.size().0 as usize) / self.lines_per_item - self.offset;
         }
         let pages = (self.items.len() / capacity) + 1;
         let mut render = TermThemeRenderer::new(term, self.theme);
@@ -128,7 +162,7 @@ impl<'a> Select<'a> {
             render.prompt(prompt)?;
         }
         let mut size_vec = Vec::new();
-        for items in self.items.iter().as_slice() {
+        for items in self.items.iter().flat_map(|i| i.split('\n')).collect::<Vec<_>>() {
             let size = &items.len();
             size_vec.push(size.clone());
         }
@@ -220,13 +254,16 @@ impl<'a> Checkboxes<'a> {
     }
 
     /// Sets a theme other than the default one.
-    pub fn with_theme(theme: &'a Theme) -> Checkboxes<'a> {
+    pub fn with_theme(theme: &'a dyn Theme) -> Checkboxes<'a> {
         Checkboxes {
             items: vec![],
+            defaults: vec![],
             clear: true,
             prompt: None,
             theme: theme,
             paged: false,
+            offset: 1,
+            lines_per_item: 1,
         }
     }
     /// Enables or disables paging
@@ -242,16 +279,41 @@ impl<'a> Checkboxes<'a> {
         self
     }
 
+    /// Sets a defaults for the menu
+    pub fn defaults(&mut self, val: &[bool]) -> &mut Checkboxes<'a> {
+        self.defaults = val.to_vec()
+            .iter()
+            .map(|x| x.clone())
+            .chain(repeat(false))
+            .take(self.items.len())
+            .collect();
+        self
+    }
+
+   /// Sets number of lines paged offset includes
+    pub fn offset(&mut self, val: usize) -> &mut Checkboxes<'a> {
+        self.offset = val;
+        self
+    }
+
+    /// Enables or disables paging
+    pub fn lines_per_item(&mut self, val: usize) -> &mut Checkboxes<'a> {
+        self.lines_per_item = val;
+        self
+    }
+
+
     /// Add a single item to the selector.
-    pub fn item(&mut self, item: &str) -> &mut Checkboxes<'a> {
+    pub fn item<T: ToString>(&mut self, item: &T) -> &mut Checkboxes<'a> {
         self.items.push(item.to_string());
+        self.defaults.push(false);
         self
     }
 
     /// Adds multiple items to the selector.
     pub fn items<T: ToString>(&mut self, items: &[T]) -> &mut Checkboxes<'a> {
         for item in items {
-            self.items.push(item.to_string());
+            self.item(item);
         }
         self
     }
@@ -278,7 +340,7 @@ impl<'a> Checkboxes<'a> {
         let mut page = 0;
         let mut capacity = self.items.len();
         if self.paged {
-            capacity = term.size().0 as usize - 1;
+            capacity = (term.size().0 as usize) / self.lines_per_item - self.offset;
         }
         let pages = (self.items.len() / capacity) + 1;
         let mut render = TermThemeRenderer::new(term, self.theme);
@@ -287,11 +349,11 @@ impl<'a> Checkboxes<'a> {
             render.prompt(prompt)?;
         }
         let mut size_vec = Vec::new();
-        for items in self.items.iter().as_slice() {
+        for items in self.items.iter().flat_map(|i| i.split('\n')).collect::<Vec<_>>() {
             let size = &items.len();
             size_vec.push(size.clone());
         }
-        let mut checked: Vec<_> = repeat(false).take(self.items.len()).collect();
+        let mut checked: Vec<bool> = self.defaults.clone();
         loop {
             for (idx, item) in self
                 .items
@@ -356,14 +418,20 @@ impl<'a> Checkboxes<'a> {
                     if let Some(ref prompt) = self.prompt {
                         render.multi_prompt_selection(prompt, &[][..])?;
                     }
-                    return Ok(vec![]);
+                    return Ok(
+                        self.defaults.clone()
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(idx, checked)| if checked { Some(idx) } else { None })
+                            .collect()
+                    );
                 }
                 Key::Enter => {
                     if self.clear {
                         render.clear()?;
                     }
                     if let Some(ref prompt) = self.prompt {
-                        let mut selections: Vec<_> = checked
+                        let selections: Vec<_> = checked
                             .iter()
                             .enumerate()
                             .filter_map(|(idx, &checked)| {
@@ -385,6 +453,243 @@ impl<'a> Checkboxes<'a> {
                 _ => {}
             }
             if sel < page * capacity || sel >= (page + 1) * capacity {
+                page = sel / capacity;
+            }
+            render.clear_preserve_prompt(&size_vec)?;
+        }
+    }
+}
+
+impl<'a> FuzzySelect<'a> {
+    /// Creates the prompt with a specific text.
+    pub fn new() -> Select<'static> {
+        Select::with_theme(get_default_theme())
+    }
+
+    /// Same as `new` but with a specific theme.
+    pub fn with_theme(theme: &'a dyn Theme) -> FuzzySelect<'a> {
+        FuzzySelect {
+            default: !0,
+            items: vec![],
+            prompt: None,
+            clear: true,
+            theme: theme,
+            paged: false,
+            offset: 1,
+            lines_per_item: 1,
+            ignore_casing: true,
+        }
+    }
+    /// Enables or disables paging
+    pub fn paged(&mut self, val: bool) -> &mut FuzzySelect<'a> {
+        self.paged = val;
+        self
+    }
+    /// Sets the clear behavior of the menu.
+    ///
+    /// The default is to clear the menu.
+    pub fn clear(&mut self, val: bool) -> &mut FuzzySelect<'a> {
+        self.clear = val;
+        self
+    }
+
+    /// Sets a default for the menu
+    pub fn default(&mut self, val: usize) -> &mut FuzzySelect<'a> {
+        self.default = val;
+        self
+    }
+
+    /// Sets number of lines paged offset includes
+    pub fn offset(&mut self, val: usize) -> &mut FuzzySelect<'a> {
+        self.offset = val;
+        self
+    }
+
+    /// Enables or disables paging
+    pub fn lines_per_item(&mut self, val: usize) -> &mut FuzzySelect<'a> {
+        self.lines_per_item = val;
+        self
+    }
+
+    /// Specify whether casing should be ignored in matches
+    pub fn ignore_casing(&mut self, val: bool) -> &mut FuzzySelect<'a> {
+        self.ignore_casing = val;
+        self
+    }
+
+    /// Add a single item to the fuzzy selector.
+    pub fn item(&mut self, item: &str) -> &mut FuzzySelect<'a> {
+        self.items.push(item.to_string());
+        self
+    }
+
+    /// Adds multiple items to the fuzzy selector.
+    pub fn items<T: ToString>(&mut self, items: &[T]) -> &mut FuzzySelect<'a> {
+        for item in items {
+            self.items.push(item.to_string());
+        }
+        self
+    }
+
+    /// Prefaces the menu with a prompt.
+    ///
+    /// When a prompt is set the system also prints out a confirmation after
+    /// the fuzzy selection.
+    pub fn with_prompt(&mut self, prompt: &str) -> &mut FuzzySelect<'a> {
+        self.prompt = Some(prompt.to_string());
+        self
+    }
+
+    /// Enables user interaction and returns the result.
+    ///
+    /// The index of the selected item.
+    /// The dialog is rendered on stderr.
+    pub fn interact(&self) -> io::Result<String> {
+        self.interact_on(&Term::stderr())
+    }
+
+    /// Enables user interaction and returns the result.
+    ///
+    /// The index of the selected item. None if the user
+    /// cancelled with Esc or 'q'.
+    /// The dialog is rendered on stderr.
+    pub fn interact_opt(&self) -> io::Result<Option<String>> {
+        self._interact_on(&Term::stderr(), true)
+    }
+
+    /// Like `interact` but allows a specific terminal to be set.
+    pub fn interact_on(&self, term: &Term) -> io::Result<String> {
+        self._interact_on(term, false)?.ok_or(io::Error::new(
+            io::ErrorKind::Other,
+            "Quit not allowed in this case",
+        ))
+    }
+
+    /// Like `interact` but allows a specific terminal to be set.
+    pub fn interact_on_opt(&self, term: &Term) -> io::Result<Option<String>> {
+        self._interact_on(term, true)
+    }
+
+    /// Like `interact` but allows a specific terminal to be set.
+    fn _interact_on(&self, term: &Term, allow_quit: bool) -> io::Result<Option<String>> {
+        let mut page = 0;
+        let mut capacity = self.items.len();
+        let mut search_term = String::new();
+        if self.paged {
+            capacity = (term.size().0 as usize) / self.lines_per_item - self.offset;
+        }
+        let pages = (self.items.len() / capacity) + 1;
+        let mut render = TermThemeRenderer::new(term, self.theme);
+        let mut sel = self.default;
+        if let Some(ref prompt) = self.prompt {
+            render.prompt(prompt)?;
+        }
+        let mut size_vec = Vec::new();
+        for items in self.items.iter().as_slice() {
+            let size = &items.len();
+            size_vec.push(size.clone());
+        }
+        loop {
+            let regexp_str = format!(r"{}\w+", search_term); 
+            let re = Regex::new(&regexp_str).unwrap();
+
+            let filtered_list: Vec<&String> = self
+                .items
+                .iter()
+                .filter(|item| if self.ignore_casing { 
+                    re.is_match(&item.to_lowercase())
+                } else {
+                    re.is_match(item)
+                })
+                .collect();
+
+            capacity = filtered_list.len();
+            if self.paged {
+                capacity = (term.size().0 as usize) / self.lines_per_item - self.offset;
+            }
+            for (idx, item) in filtered_list
+                .iter()
+                .enumerate()
+                .skip(page * capacity)
+                .take(capacity)
+            {
+                render.selection(
+                    item,
+                    if sel == idx {
+                        SelectionStyle::MenuSelected
+                    } else {
+                        SelectionStyle::MenuUnselected
+                    },
+                )?;
+            }
+            match term.read_key()? {
+                Key::ArrowDown => {
+                    if sel == !0 {
+                        sel = 0;
+                    } else {
+                        sel = (sel as u64 + 1).rem(filtered_list.len() as u64) as usize;
+                    }
+                }
+                Key::Escape => {
+                    if allow_quit {
+                        if self.clear {
+                            term.clear_last_lines(filtered_list.len())?;
+                        }
+                        return Ok(None);
+                    }
+                }
+                Key::ArrowUp if filtered_list.len() > 0 => {
+                    if sel == !0 {
+                        sel = filtered_list.len() - 1;
+                    } else {
+                        sel = ((sel as i64 - 1 + filtered_list.len() as i64)
+                            % (filtered_list.len() as i64)) as usize;
+                    }
+                }
+                Key::ArrowLeft => {
+                    if self.paged {
+                        if page == 0 {
+                            page = pages - 1;
+                        } else {
+                            page = page - 1;
+                        }
+                        sel = page * capacity;
+                    }
+                }
+                Key::ArrowRight => {
+                    if self.paged {
+                        if page == pages - 1 {
+                            page = 0;
+                        } else {
+                            page = page + 1;
+                        }
+                        sel = page * capacity;
+                    }
+                }
+
+                Key::Enter if filtered_list.len() > 0 => {
+                    if self.clear {
+                        render.clear()?;
+                    }
+                    if let Some(ref prompt) = self.prompt {
+                        render.single_prompt_selection(prompt, &filtered_list[sel])?;
+                    }
+                    return Ok(Some(filtered_list[sel].to_owned()));
+                },
+                Key::Backspace => {
+                    search_term.pop();
+                },
+                Key::Char(key) => {
+                    if self.ignore_casing {
+                        search_term.push(key.to_lowercase().to_string().pop().unwrap());
+                    } else { 
+                        search_term.push(key);
+                    }
+                    sel = 0;
+                },
+                _ => {}
+            }
+            if filtered_list.len() > 0 && (sel < page * capacity || sel >= (page + 1) * capacity) {
                 page = sel / capacity;
             }
             render.clear_preserve_prompt(&size_vec)?;
