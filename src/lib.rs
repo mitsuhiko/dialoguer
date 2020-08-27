@@ -25,6 +25,9 @@ pub use prompts::{
 };
 pub use validate::Validator;
 
+#[cfg(feature = "fuzzy-select")]
+pub use prompts::fuzzy_select::FuzzySelect;
+
 mod edit;
 mod prompts;
 pub mod theme;
